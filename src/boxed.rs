@@ -1,78 +1,6 @@
-//! A Non-empty growable vector.
-//!
-//! Non-emptiness can be a powerful guarantee. If your main use of `Vec` is as
-//! an `Iterator`, then you may not need to distinguish on emptiness. But there
-//! are indeed times when the `Vec` you receive as as function argument needs to
-//! be non-empty or your function can't proceed. Similarly, there are times when
-//! the `Vec` you return to a calling user needs to promise it actually contains
-//! something.
-//!
-//! With `NonEmpty`, you're freed from the boilerplate of constantly needing to
-//! check `is_empty()` or pattern matching before proceeding, or erroring if you
-//! can't. So overall, code, type signatures, and logic become cleaner.
-//!
-//! Consider that unlike `Vec`, [`NonEmpty::first`] and [`NonEmpty::last`] don't
-//! return in `Option`, they always succeed.
-//!
-//! # Examples
-//!
-//! The simplest way to construct a [`NonEmpty`] is via the [`nonempty`] macro:
-//!
-//! ```
-//! use nonempty::{NonEmpty, nonempty};
-//!
-//! let l: NonEmpty<u32> = nonempty![1, 2, 3];
-//! assert_eq!(l.head, 1);
-//! ```
-//!
-//! Unlike the familiar `vec!` macro, `nonempty!` requires at least one element:
-//!
-//! ```
-//! use nonempty::nonempty;
-//!
-//! let l = nonempty![1];
-//!
-//! // Doesn't compile!
-//! // let l = nonempty![];
-//! ```
-//!
-//! Like `Vec`, you can also construct a [`NonEmpty`] the old fashioned way with
-//! [`NonEmpty::new`] or its constructor:
-//!
-//! ```
-//! use nonempty::NonEmpty;
-//!
-//! let mut l = NonEmpty { head: 42, tail: vec![36, 58] };
-//! assert_eq!(l.head, 42);
-//!
-//! l.push(9001);
-//! assert_eq!(l.last(), &9001);
-//! ```
-//!
-//! And if necessary, you're free to convert to and from `Vec`:
-//!
-//! ```
-//! use nonempty::{NonEmpty, nonempty};
-//!
-//! let l: NonEmpty<u32> = nonempty![42, 36, 58, 9001];
-//! let v: Vec<u32> = l.into();
-//! assert_eq!(v, vec![42, 36, 58, 9001]);
-//!
-//! let u: Option<NonEmpty<u32>> = NonEmpty::from_vec(v);
-//! assert_eq!(Some(nonempty![42, 36, 58, 9001]), u);
-//! ```
-//!
-//! # Caveats
-//!
-//! Since `NonEmpty` must have a least one element, it is not possible to
-//! implement the `FromInterator` trait for it. We can't know, in general, if
-//! any given `Iterator` actually contains something.
-//!
-//! # Features
-//!
-//! * `serialize`: `serde` support.
 #[cfg(feature = "serialize")]
 use serde::{
+    de,
     ser::{SerializeSeq, Serializer},
     Deserialize, Serialize,
 };
@@ -80,45 +8,43 @@ use std::cmp::Ordering;
 use std::mem;
 use std::{iter, vec};
 
-pub mod boxed;
-pub mod nonzero;
-
-/// Like the `vec!` macro, but enforces at least one argument. A nice short-hand
-/// for constructing [`NonEmpty`] values.
-///
-/// ```
-/// use nonempty::{NonEmpty, nonempty};
-///
-/// let v = nonempty![1, 2, 3];
-/// assert_eq!(v, NonEmpty { head: 1, tail: vec![2, 3] });
-///
-/// let v = nonempty![1];
-/// assert_eq!(v, NonEmpty { head: 1, tail: Vec::new() });
-///
-/// // Doesn't compile!
-/// // let v = nonempty![];
-/// ```
 #[macro_export]
-macro_rules! nonempty {
-    ($h:expr, $( $x:expr ),*) => {{
+macro_rules! nonempty_boxed {
+    ($h:expr, $($x:expr),+ $(,)?) => {{
         let tail = vec![$($x),*];
-        $crate::NonEmpty { head: $h, tail }
+        $crate::boxed::NonEmpty{ head: Box::new($h), tail }
     }};
     ($h:expr) => {
-        $crate::NonEmpty {
-            head: $h,
+        $crate::boxed::NonEmpty{
+            head: Box::new($h),
             tail: Vec::new(),
         }
     };
 }
 
 /// Non-empty vector.
-#[cfg_attr(feature = "serialize", derive(Deserialize))]
-#[cfg_attr(feature = "serialize", serde(try_from = "Vec<T>"))]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NonEmpty<T> {
-    pub head: T,
+    pub head: Box<T>,
     pub tail: Vec<T>,
+}
+
+#[cfg(feature = "serialize")]
+impl<'de, T> Deserialize<'de> for NonEmpty<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match Vec::<T>::deserialize(deserializer)? {
+            v if v.is_empty() => Err(de::Error::custom(
+                "the vector provided was empty, NonEmpty needs at least one element",
+            )),
+            v => Ok(NonEmpty::from_vec(v).unwrap_or_else(|| unreachable!())),
+        }
+    }
 }
 
 // Nb. `Serialize` is implemented manually, as serde's `into` container attribute
@@ -183,7 +109,7 @@ impl<'a, T> core::iter::FusedIterator for Iter<'a, T> {}
 
 impl<T> NonEmpty<T> {
     /// Alias for [`NonEmpty::singleton`].
-    pub const fn new(e: T) -> Self {
+    pub fn new(e: T) -> Self {
         Self::singleton(e)
     }
 
@@ -196,15 +122,15 @@ impl<T> NonEmpty<T> {
         let mut iter = iter.into_iter();
         let head = iter.next()?;
         Some(Self {
-            head,
+            head: Box::new(head),
             tail: iter.collect(),
         })
     }
 
     /// Create a new non-empty list with an initial element.
-    pub const fn singleton(head: T) -> Self {
+    pub fn singleton(head: T) -> Self {
         NonEmpty {
-            head,
+            head: Box::new(head),
             tail: Vec::new(),
         }
     }
@@ -220,37 +146,11 @@ impl<T> NonEmpty<T> {
     }
 
     /// Get the mutable reference to the first element. Never fails.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut non_empty = NonEmpty::new(42);
-    /// let head = non_empty.first_mut();
-    /// *head += 1;
-    /// assert_eq!(non_empty.first(), &43);
-    ///
-    /// let mut non_empty = NonEmpty::from((1, vec![4, 2, 3]));
-    /// let head = non_empty.first_mut();
-    /// *head *= 42;
-    /// assert_eq!(non_empty.first(), &42);
-    /// ```
     pub fn first_mut(&mut self) -> &mut T {
         &mut self.head
     }
 
     /// Get the possibly-empty tail of the list.
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::new(42);
-    /// assert_eq!(non_empty.tail(), &[]);
-    ///
-    /// let non_empty = NonEmpty::from((1, vec![4, 2, 3]));
-    /// assert_eq!(non_empty.tail(), &[4, 2, 3]);
-    /// ```
     pub fn tail(&self) -> &[T] {
         &self.tail
     }
@@ -270,27 +170,13 @@ impl<T> NonEmpty<T> {
     /// # Panics
     ///
     /// Panics if index > len.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut non_empty = NonEmpty::from((1, vec![2, 3]));
-    /// non_empty.insert(1, 4);
-    /// assert_eq!(non_empty, NonEmpty::from((1, vec![4, 2, 3])));
-    /// non_empty.insert(4, 5);
-    /// assert_eq!(non_empty, NonEmpty::from((1, vec![4, 2, 3, 5])));
-    /// non_empty.insert(0, 42);
-    /// assert_eq!(non_empty, NonEmpty::from((42, vec![1, 4, 2, 3, 5])));
-    /// ```
     pub fn insert(&mut self, index: usize, element: T) {
         let len = self.len();
         assert!(index <= len);
 
         if index == 0 {
-            let head = mem::replace(&mut self.head, element);
-            self.tail.insert(0, head);
+            let head = mem::replace(&mut self.head, Box::new(element));
+            self.tail.insert(0, *head);
         } else {
             self.tail.insert(index - 1, element);
         }
@@ -323,15 +209,6 @@ impl<T> NonEmpty<T> {
     }
 
     /// Check whether an element is contained in the list.
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut l = NonEmpty::from((42, vec![36, 58]));
-    ///
-    /// assert!(l.contains(&42));
-    /// assert!(!l.contains(&101));
-    /// ```
     pub fn contains(&self, x: &T) -> bool
     where
         T: PartialEq,
@@ -363,19 +240,6 @@ impl<T> NonEmpty<T> {
         self.tail.truncate(len - 1);
     }
 
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut l = NonEmpty::from((42, vec![36, 58]));
-    ///
-    /// let mut l_iter = l.iter();
-    ///
-    /// assert_eq!(l_iter.len(), 3);
-    /// assert_eq!(l_iter.next(), Some(&42));
-    /// assert_eq!(l_iter.next(), Some(&36));
-    /// assert_eq!(l_iter.next(), Some(&58));
-    /// assert_eq!(l_iter.next(), None);
-    /// ```
     pub fn iter(&self) -> Iter<T> {
         Iter {
             head: Some(&self.head),
@@ -383,50 +247,20 @@ impl<T> NonEmpty<T> {
         }
     }
 
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut l = NonEmpty::new(42);
-    /// l.push(36);
-    /// l.push(58);
-    ///
-    /// for i in l.iter_mut() {
-    ///     *i *= 10;
-    /// }
-    ///
-    /// let mut l_iter = l.iter();
-    ///
-    /// assert_eq!(l_iter.next(), Some(&420));
-    /// assert_eq!(l_iter.next(), Some(&360));
-    /// assert_eq!(l_iter.next(), Some(&580));
-    /// assert_eq!(l_iter.next(), None);
-    /// ```
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
-        iter::once(&mut self.head).chain(self.tail.iter_mut())
+        iter::once(&mut *self.head).chain(self.tail.iter_mut())
     }
 
     /// Often we have a `Vec` (or slice `&[T]`) but want to ensure that it is `NonEmpty` before
     /// proceeding with a computation. Using `from_slice` will give us a proof
     /// that we have a `NonEmpty` in the `Some` branch, otherwise it allows
     /// the caller to handle the `None` case.
-    ///
-    /// # Example Use
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty_vec = NonEmpty::from_slice(&[1, 2, 3, 4, 5]);
-    /// assert_eq!(non_empty_vec, Some(NonEmpty::from((1, vec![2, 3, 4, 5]))));
-    ///
-    /// let empty_vec: Option<NonEmpty<&u32>> = NonEmpty::from_slice(&[]);
-    /// assert!(empty_vec.is_none());
-    /// ```
     pub fn from_slice(slice: &[T]) -> Option<NonEmpty<T>>
     where
         T: Clone,
     {
         slice.split_first().map(|(h, t)| NonEmpty {
-            head: h.clone(),
+            head: Box::new(h.clone()),
             tail: t.into(),
         })
     }
@@ -438,23 +272,11 @@ impl<T> NonEmpty<T> {
     ///
     /// This version will consume the `Vec` you pass in. If you would rather pass the data as a
     /// slice then use `NonEmpty::from_slice`.
-    ///
-    /// # Example Use
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty_vec = NonEmpty::from_vec(vec![1, 2, 3, 4, 5]);
-    /// assert_eq!(non_empty_vec, Some(NonEmpty::from((1, vec![2, 3, 4, 5]))));
-    ///
-    /// let empty_vec: Option<NonEmpty<&u32>> = NonEmpty::from_vec(vec![]);
-    /// assert!(empty_vec.is_none());
-    /// ```
     pub fn from_vec(mut vec: Vec<T>) -> Option<NonEmpty<T>> {
         if vec.is_empty() {
             None
         } else {
-            let head = vec.remove(0);
+            let head = Box::new(vec.remove(0));
             Some(NonEmpty { head, tail: vec })
         }
     }
@@ -462,22 +284,6 @@ impl<T> NonEmpty<T> {
     /// Deconstruct a `NonEmpty` into its head and tail.
     /// This operation never fails since we are guranteed
     /// to have a head element.
-    ///
-    /// # Example Use
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut non_empty = NonEmpty::from((1, vec![2, 3, 4, 5]));
-    ///
-    /// // Guaranteed to have the head and we also get the tail.
-    /// assert_eq!(non_empty.split_first(), (&1, &[2, 3, 4, 5][..]));
-    ///
-    /// let non_empty = NonEmpty::new(1);
-    ///
-    /// // Guaranteed to have the head element.
-    /// assert_eq!(non_empty.split_first(), (&1, &[][..]));
-    /// ```
     pub fn split_first(&self) -> (&T, &[T]) {
         (&self.head, &self.tail)
     }
@@ -486,23 +292,6 @@ impl<T> NonEmpty<T> {
     /// middle elements, in that order.
     ///
     /// If there is only one element then first == last.
-    ///
-    /// # Example Use
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut non_empty = NonEmpty::from((1, vec![2, 3, 4, 5]));
-    ///
-    /// // Guaranteed to have the last element and the elements
-    /// // preceding it.
-    /// assert_eq!(non_empty.split(), (&1, &[2, 3, 4][..], &5));
-    ///
-    /// let non_empty = NonEmpty::new(1);
-    ///
-    /// // Guaranteed to have the last element.
-    /// assert_eq!(non_empty.split(), (&1, &[][..], &1));
-    /// ```
     pub fn split(&self) -> (&T, &[T], &T) {
         match self.tail.split_last() {
             None => (&self.head, &[], &self.head),
@@ -511,20 +300,6 @@ impl<T> NonEmpty<T> {
     }
 
     /// Append a `Vec` to the tail of the `NonEmpty`.
-    ///
-    /// # Example Use
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut non_empty = NonEmpty::new(1);
-    /// let mut vec = vec![2, 3, 4, 5];
-    /// non_empty.append(&mut vec);
-    ///
-    /// let mut expected = NonEmpty::from((1, vec![2, 3, 4, 5]));
-    ///
-    /// assert_eq!(non_empty, expected);
-    /// ```
     pub fn append(&mut self, other: &mut Vec<T>) {
         self.tail.append(other)
     }
@@ -533,26 +308,12 @@ impl<T> NonEmpty<T> {
     /// we wish to keep the `NonEmpty` structure guaranteeing
     /// that there is at least one element. Otherwise, we can
     /// use `nonempty.iter().map(f)`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::from((1, vec![2, 3, 4, 5]));
-    ///
-    /// let squares = non_empty.map(|i| i * i);
-    ///
-    /// let expected = NonEmpty::from((1, vec![4, 9, 16, 25]));
-    ///
-    /// assert_eq!(squares, expected);
-    /// ```
     pub fn map<U, F>(self, mut f: F) -> NonEmpty<U>
     where
         F: FnMut(T) -> U,
     {
         NonEmpty {
-            head: f(self.head),
+            head: Box::new(f(*self.head)),
             tail: self.tail.into_iter().map(f).collect(),
         }
     }
@@ -563,7 +324,7 @@ impl<T> NonEmpty<T> {
         F: FnMut(T) -> Result<U, E>,
     {
         Ok(NonEmpty {
-            head: f(self.head)?,
+            head: Box::new(f(*self.head)?),
             tail: self.tail.into_iter().map(f).collect::<Result<_, _>>()?,
         })
     }
@@ -571,29 +332,11 @@ impl<T> NonEmpty<T> {
     /// When we have a function that goes from some `T` to a `NonEmpty<U>`,
     /// we may want to apply it to a `NonEmpty<T>` but keep the structure flat.
     /// This is where `flat_map` shines.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::from((1, vec![2, 3, 4, 5]));
-    ///
-    /// let windows = non_empty.flat_map(|i| {
-    ///     let mut next = NonEmpty::new(i + 5);
-    ///     next.push(i + 6);
-    ///     next
-    /// });
-    ///
-    /// let expected = NonEmpty::from((6, vec![7, 7, 8, 8, 9, 9, 10, 10, 11]));
-    ///
-    /// assert_eq!(windows, expected);
-    /// ```
     pub fn flat_map<U, F>(self, mut f: F) -> NonEmpty<U>
     where
         F: FnMut(T) -> NonEmpty<U>,
     {
-        let mut heads = f(self.head);
+        let mut heads = f(*self.head);
         let mut tails = self
             .tail
             .into_iter()
@@ -604,21 +347,6 @@ impl<T> NonEmpty<T> {
     }
 
     /// Flatten nested `NonEmpty`s into a single one.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::from((
-    ///     NonEmpty::from((1, vec![2, 3])),
-    ///     vec![NonEmpty::from((4, vec![5]))],
-    /// ));
-    ///
-    /// let expected = NonEmpty::from((1, vec![2, 3, 4, 5]));
-    ///
-    /// assert_eq!(NonEmpty::flatten(non_empty), expected);
-    /// ```
     pub fn flatten(full: NonEmpty<NonEmpty<T>>) -> Self {
         full.flat_map(|n| n)
     }
@@ -630,32 +358,6 @@ impl<T> NonEmpty<T> {
     ///
     /// If the value is not found then Result::Err is returned, containing the index where a
     /// matching element could be inserted while maintaining sorted order.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::from((0, vec![1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55]));
-    /// assert_eq!(non_empty.binary_search(&0),   Ok(0));
-    /// assert_eq!(non_empty.binary_search(&13),  Ok(9));
-    /// assert_eq!(non_empty.binary_search(&4),   Err(7));
-    /// assert_eq!(non_empty.binary_search(&100), Err(13));
-    /// let r = non_empty.binary_search(&1);
-    /// assert!(match r { Ok(1..=4) => true, _ => false, });
-    /// ```
-    ///
-    /// If you want to insert an item to a sorted non-empty vector, while maintaining sort order:
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let mut non_empty = NonEmpty::from((0, vec![1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55]));
-    /// let num = 42;
-    /// let idx = non_empty.binary_search(&num).unwrap_or_else(|x| x);
-    /// non_empty.insert(idx, num);
-    /// assert_eq!(non_empty, NonEmpty::from((0, vec![1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 42, 55])));
-    /// ```
     pub fn binary_search(&self, x: &T) -> Result<usize, usize>
     where
         T: Ord,
@@ -672,28 +374,6 @@ impl<T> NonEmpty<T> {
     /// If there are multiple matches, then any one of the matches could be returned.
     /// If the value is not found then Result::Err is returned, containing the index where a matching element could be
     /// inserted while maintaining sorted order.
-    ///
-    /// # Examples
-    ///
-    /// Looks up a series of four elements. The first is found, with a uniquely determined
-    /// position; the second and third are not found; the fourth could match any position in [1,4].
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::from((0, vec![1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55]));
-    /// let seek = 0;
-    /// assert_eq!(non_empty.binary_search_by(|probe| probe.cmp(&seek)), Ok(0));
-    /// let seek = 13;
-    /// assert_eq!(non_empty.binary_search_by(|probe| probe.cmp(&seek)), Ok(9));
-    /// let seek = 4;
-    /// assert_eq!(non_empty.binary_search_by(|probe| probe.cmp(&seek)), Err(7));
-    /// let seek = 100;
-    /// assert_eq!(non_empty.binary_search_by(|probe| probe.cmp(&seek)), Err(13));
-    /// let seek = 1;
-    /// let r = non_empty.binary_search_by(|probe| probe.cmp(&seek));
-    /// assert!(match r { Ok(1..=4) => true, _ => false, });
-    /// ```
     pub fn binary_search_by<'a, F>(&'a self, mut f: F) -> Result<usize, usize>
     where
         F: FnMut(&'a T) -> Ordering,
@@ -716,30 +396,6 @@ impl<T> NonEmpty<T> {
     /// If the value is found then Result::Ok is returned, containing the index of the matching element. If there are multiple matches,
     /// then any one of the matches could be returned. If the value is not found then Result::Err is returned,
     /// containing the index where a matching element could be inserted while maintaining sorted order.
-    ///
-    /// # Examples
-    ///
-    /// Looks up a series of four elements in a non-empty vector of pairs sorted by their second elements.
-    /// The first is found, with a uniquely determined position; the second and third are not found;
-    /// the fourth could match any position in [1, 4].
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::from((
-    ///     (0, 0),
-    ///     vec![(2, 1), (4, 1), (5, 1), (3, 1),
-    ///          (1, 2), (2, 3), (4, 5), (5, 8), (3, 13),
-    ///          (1, 21), (2, 34), (4, 55)]
-    /// ));
-    ///
-    /// assert_eq!(non_empty.binary_search_by_key(&0, |&(a,b)| b),  Ok(0));
-    /// assert_eq!(non_empty.binary_search_by_key(&13, |&(a,b)| b),  Ok(9));
-    /// assert_eq!(non_empty.binary_search_by_key(&4, |&(a,b)| b),   Err(7));
-    /// assert_eq!(non_empty.binary_search_by_key(&100, |&(a,b)| b), Err(13));
-    /// let r = non_empty.binary_search_by_key(&1, |&(a,b)| b);
-    /// assert!(match r { Ok(1..=4) => true, _ => false, });
-    /// ```
     pub fn binary_search_by_key<'a, B, F>(&'a self, b: &B, mut f: F) -> Result<usize, usize>
     where
         B: Ord,
@@ -751,18 +407,6 @@ impl<T> NonEmpty<T> {
     /// Returns the maximum element in the non-empty vector.
     ///
     /// This will return the first item in the vector if the tail is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::new(42);
-    /// assert_eq!(non_empty.maximum(), &42);
-    ///
-    /// let non_empty = NonEmpty::from((1, vec![-34, 42, 76, 4, 5]));
-    /// assert_eq!(non_empty.maximum(), &76);
-    /// ```
     pub fn maximum(&self) -> &T
     where
         T: Ord,
@@ -773,18 +417,6 @@ impl<T> NonEmpty<T> {
     /// Returns the minimum element in the non-empty vector.
     ///
     /// This will return the first item in the vector if the tail is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::new(42);
-    /// assert_eq!(non_empty.minimum(), &42);
-    ///
-    /// let non_empty = NonEmpty::from((1, vec![-34, 42, 76, 4, 5]));
-    /// assert_eq!(non_empty.minimum(), &-34);
-    /// ```
     pub fn minimum(&self) -> &T
     where
         T: Ord,
@@ -795,23 +427,11 @@ impl<T> NonEmpty<T> {
     /// Returns the element that gives the maximum value with respect to the specified comparison function.
     ///
     /// This will return the first item in the vector if the tail is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::new((0, 42));
-    /// assert_eq!(non_empty.maximum_by(|(k, _), (l, _)| k.cmp(l)), &(0, 42));
-    ///
-    /// let non_empty = NonEmpty::from(((2, 1), vec![(2, -34), (4, 42), (0, 76), (1, 4), (3, 5)]));
-    /// assert_eq!(non_empty.maximum_by(|(k, _), (l, _)| k.cmp(l)), &(4, 42));
-    /// ```
     pub fn maximum_by<F>(&self, compare: F) -> &T
     where
         F: Fn(&T, &T) -> Ordering,
     {
-        let mut max = &self.head;
+        let mut max = &*self.head;
         for i in self.tail.iter() {
             max = match compare(max, i) {
                 Ordering::Equal => max,
@@ -825,16 +445,6 @@ impl<T> NonEmpty<T> {
     /// Returns the element that gives the minimum value with respect to the specified comparison function.
     ///
     /// This will return the first item in the vector if the tail is empty.
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::new((0, 42));
-    /// assert_eq!(non_empty.minimum_by(|(k, _), (l, _)| k.cmp(l)), &(0, 42));
-    ///
-    /// let non_empty = NonEmpty::from(((2, 1), vec![(2, -34), (4, 42), (0, 76), (1, 4), (3, 5)]));
-    /// assert_eq!(non_empty.minimum_by(|(k, _), (l, _)| k.cmp(l)), &(0, 76));
-    /// ```
     pub fn minimum_by<F>(&self, compare: F) -> &T
     where
         F: Fn(&T, &T) -> Ordering,
@@ -845,18 +455,6 @@ impl<T> NonEmpty<T> {
     /// Returns the element that gives the maximum value with respect to the specified function.
     ///
     /// This will return the first item in the vector if the tail is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::new((0, 42));
-    /// assert_eq!(non_empty.maximum_by_key(|(k, _)| k), &(0, 42));
-    ///
-    /// let non_empty = NonEmpty::from(((2, 1), vec![(2, -34), (4, 42), (0, 76), (1, 4), (3, 5)]));
-    /// assert_eq!(non_empty.maximum_by_key(|(k, _)| k), &(4, 42));
-    /// ```
     pub fn maximum_by_key<U, F>(&self, f: F) -> &T
     where
         U: Ord,
@@ -868,18 +466,6 @@ impl<T> NonEmpty<T> {
     /// Returns the element that gives the minimum value with respect to the specified function.
     ///
     /// This will return the first item in the vector if the tail is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::new((0, 42));
-    /// assert_eq!(non_empty.minimum_by_key(|(k, _)| k), &(0, 42));
-    ///
-    /// let non_empty = NonEmpty::from(((2, 1), vec![(2, -34), (4, 42), (0, 76), (1, 4), (3, 5)]));
-    /// assert_eq!(non_empty.minimum_by_key(|(k, _)| k), &(0, 76));
-    /// ```
     pub fn minimum_by_key<U, F>(&self, f: F) -> &T
     where
         U: Ord,
@@ -898,14 +484,14 @@ impl<T: Default> Default for NonEmpty<T> {
 impl<T> From<NonEmpty<T>> for Vec<T> {
     /// Turns a non-empty list into a Vec.
     fn from(nonempty: NonEmpty<T>) -> Vec<T> {
-        iter::once(nonempty.head).chain(nonempty.tail).collect()
+        iter::once(*nonempty.head).chain(nonempty.tail).collect()
     }
 }
 
 impl<T> From<NonEmpty<T>> for (T, Vec<T>) {
     /// Turns a non-empty list into a Vec.
     fn from(nonempty: NonEmpty<T>) -> (T, Vec<T>) {
-        (nonempty.head, nonempty.tail)
+        (*nonempty.head, nonempty.tail)
     }
 }
 
@@ -913,7 +499,10 @@ impl<T> From<(T, Vec<T>)> for NonEmpty<T> {
     /// Turns a pair of an element and a Vec into
     /// a NonEmpty.
     fn from((head, tail): (T, Vec<T>)) -> Self {
-        NonEmpty { head, tail }
+        NonEmpty {
+            head: Box::new(head),
+            tail,
+        }
     }
 }
 
@@ -922,7 +511,7 @@ impl<T> IntoIterator for NonEmpty<T> {
     type IntoIter = iter::Chain<iter::Once<T>, vec::IntoIter<Self::Item>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        iter::once(self.head).chain(self.tail)
+        iter::once(*self.head).chain(self.tail)
     }
 }
 
@@ -931,22 +520,13 @@ impl<'a, T> IntoIterator for &'a NonEmpty<T> {
     type IntoIter = iter::Chain<iter::Once<&'a T>, std::slice::Iter<'a, T>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        iter::once(&self.head).chain(self.tail.iter())
+        iter::once(&*self.head).chain(self.tail.iter())
     }
 }
 
 impl<T> std::ops::Index<usize> for NonEmpty<T> {
     type Output = T;
 
-    /// ```
-    /// use nonempty::NonEmpty;
-    ///
-    /// let non_empty = NonEmpty::from((1, vec![2, 3, 4, 5]));
-    ///
-    /// assert_eq!(non_empty[0], 1);
-    /// assert_eq!(non_empty[1], 2);
-    /// assert_eq!(non_empty[3], 4);
-    /// ```
     fn index(&self, index: usize) -> &T {
         if index > 0 {
             &self.tail[index - 1]
@@ -972,7 +552,6 @@ impl<A> Extend<A> for NonEmpty<A> {
     }
 }
 
-#[cfg(feature = "serialize")]
 pub mod serialize {
     use std::{convert::TryFrom, fmt};
 
@@ -1004,13 +583,13 @@ pub mod serialize {
 
 #[cfg(test)]
 mod tests {
-    use crate::NonEmpty;
+    use super::NonEmpty;
 
     #[test]
     fn test_from_conversion() {
         let result = NonEmpty::from((1, vec![2, 3, 4, 5]));
         let expected = NonEmpty {
-            head: 1,
+            head: Box::new(1),
             tail: vec![2, 3, 4, 5],
         };
         assert_eq!(result, expected);
@@ -1061,12 +640,12 @@ mod tests {
     #[test]
     fn test_mutate_head() {
         let mut non_empty = NonEmpty::new(42);
-        non_empty.head += 1;
-        assert_eq!(non_empty.head, 43);
+        *non_empty.head += 1;
+        assert_eq!(*non_empty.head, 43);
 
         let mut non_empty = NonEmpty::from((1, vec![4, 2, 3]));
-        non_empty.head *= 42;
-        assert_eq!(non_empty.head, 42);
+        *non_empty.head *= 42;
+        assert_eq!(*non_empty.head, 42);
     }
 
     #[test]
@@ -1077,25 +656,29 @@ mod tests {
         assert_eq!(NonEmpty::<()>::collect(once(())), Some(NonEmpty::new(())));
         assert_eq!(
             NonEmpty::<u8>::collect(once(1).chain(once(2))),
-            Some(nonempty!(1, 2))
+            Some(nonempty_boxed!(1, 2))
         );
     }
 
     #[test]
     fn test_try_map() {
         assert_eq!(
-            nonempty!(1, 2, 3, 4).try_map(Ok::<_, String>),
-            Ok(nonempty!(1, 2, 3, 4))
+            nonempty_boxed!(1, 2, 3, 4).try_map(Ok::<_, String>),
+            Ok(nonempty_boxed!(1, 2, 3, 4))
         );
         assert_eq!(
-            nonempty!(1, 2, 3, 4).try_map(|i| if i % 2 == 0 { Ok(i) } else { Err("not even") }),
+            nonempty_boxed!(1, 2, 3, 4).try_map(|i| if i % 2 == 0 {
+                Ok(i)
+            } else {
+                Err("not even")
+            }),
             Err("not even")
         );
     }
 
     #[cfg(feature = "serialize")]
     mod serialize {
-        use crate::NonEmpty;
+        use super::NonEmpty;
         use serde::{Deserialize, Serialize};
 
         #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1120,7 +703,7 @@ mod tests {
 
         #[test]
         fn test_serialization() -> Result<(), Box<dyn std::error::Error>> {
-            let ne = nonempty![1, 2, 3, 4, 5];
+            let ne = nonempty_boxed![1, 2, 3, 4, 5];
             let ve = vec![1, 2, 3, 4, 5];
 
             assert_eq!(serde_json::to_string(&ne)?, serde_json::to_string(&ve)?);
