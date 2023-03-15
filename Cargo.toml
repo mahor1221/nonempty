@@ -9,9 +9,12 @@ repository = "https://github.com/cloudhead/nonempty"
 
 [dependencies]
 serde = { features = ["serde_derive"], optional = true, version = "1" }
+proptest = { version = "1.1.0", optional = true }
+proptest-derive = {version = "0.3.0", optional = true }
 
 [features]
 serialize = ["serde"]
+arbitrary = ["dep:proptest", "dep:proptest-derive"]
 
 [dev-dependencies]
 serde_json = "1"

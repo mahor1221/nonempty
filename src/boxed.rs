@@ -8,6 +8,9 @@ use std::cmp::Ordering;
 use std::mem;
 use std::{iter, vec};
 
+#[cfg(feature = "arbitrary")]
+use proptest_derive::Arbitrary;
+
 #[macro_export]
 macro_rules! nonempty_boxed {
     ($h:expr, $($x:expr),+ $(,)?) => {{
@@ -23,6 +26,7 @@ macro_rules! nonempty_boxed {
 }
 
 /// Non-empty vector.
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NonEmpty<T> {
     pub head: Box<T>,
